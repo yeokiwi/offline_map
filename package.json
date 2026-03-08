@@ -1,0 +1,16 @@
+{
+  "name": "offline-map",
+  "version": "1.0.0",
+  "description": "Offline map viewer for Singapore with street and satellite views",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "download:street": "node downloader.js --type street --zoom 15 --bbox 103.6,1.15,104.1,1.50",
+    "download:satellite": "node downloader.js --type satellite --zoom 15 --bbox 103.6,1.15,104.1,1.50"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "better-sqlite3": "^9.4.3",
+    "axios": "^1.6.7"
+  }
+}
