@@ -60,9 +60,6 @@ app.get('/tiles/:type/:z/:x/:y.png', (req, res) => {
     return res.status(400).send('Invalid tile type');
   }
 
-  // TMS Y-flip: MBTiles uses TMS convention
-  const tmsY = Math.pow(2, z) - 1 - y;
-
   const db = getDb(type);
   if (!db) {
     res.set('Content-Type', 'image/png');
@@ -70,10 +67,11 @@ app.get('/tiles/:type/:z/:x/:y.png', (req, res) => {
     return res.send(PLACEHOLDER_PNG);
   }
 
+  // Tiles are stored with XYZ convention (same as downloaded), so query directly
   const stmt = db.prepare(
     'SELECT tile_data FROM tiles WHERE zoom_level = ? AND tile_column = ? AND tile_row = ?'
   );
-  stmt.bind([z, x, tmsY]);
+  stmt.bind([z, x, y]);
 
   if (stmt.step()) {
     const row = stmt.get();
