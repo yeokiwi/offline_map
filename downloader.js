@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 const axios = require('axios');
-const Database = require('better-sqlite3');
+const initSqlJs = require('sql.js');
 const fs = require('fs');
 const path = require('path');
 
@@ -74,10 +74,18 @@ function getTileUrl(type, z, x, y) {
 
 // --- Database setup ---
 
-function initDatabase(dbPath) {
-  const db = new Database(dbPath);
-  db.pragma('journal_mode = WAL');
-  db.exec(`
+async function initDatabase(dbPath) {
+  const SQL = await initSqlJs();
+
+  let db;
+  if (fs.existsSync(dbPath)) {
+    const fileBuffer = fs.readFileSync(dbPath);
+    db = new SQL.Database(fileBuffer);
+  } else {
+    db = new SQL.Database();
+  }
+
+  db.run(`
     CREATE TABLE IF NOT EXISTS tiles (
       zoom_level INTEGER,
       tile_column INTEGER,
@@ -85,9 +93,16 @@ function initDatabase(dbPath) {
       tile_data BLOB,
       PRIMARY KEY (zoom_level, tile_column, tile_row)
     );
-    CREATE TABLE IF NOT EXISTS metadata (name TEXT, value TEXT);
   `);
+  db.run('CREATE TABLE IF NOT EXISTS metadata (name TEXT, value TEXT);');
+
   return db;
+}
+
+function saveDatabase(db, dbPath) {
+  const data = db.export();
+  const buffer = Buffer.from(data);
+  fs.writeFileSync(dbPath, buffer);
 }
 
 // --- Download logic ---
@@ -108,8 +123,8 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function downloadAll(type, tiles, db, failedLogPath) {
-  const insert = db.prepare(
+async function downloadAll(type, tiles, db, dbPath, failedLogPath) {
+  const insertStmt = db.prepare(
     'INSERT OR REPLACE INTO tiles (zoom_level, tile_column, tile_row, tile_data) VALUES (?, ?, ?, ?)'
   );
 
@@ -117,6 +132,7 @@ async function downloadAll(type, tiles, db, failedLogPath) {
   let downloaded = 0;
   let failed = 0;
   const concurrency = 2;
+  const saveInterval = 50; // Save to disk every 50 tiles
 
   const failedStream = fs.createWriteStream(failedLogPath, { flags: 'a' });
 
@@ -125,7 +141,9 @@ async function downloadAll(type, tiles, db, failedLogPath) {
     const promises = batch.map(async (tile) => {
       try {
         const data = await downloadTile(type, tile.z, tile.x, tile.y);
-        insert.run(tile.z, tile.x, tile.y, data);
+        insertStmt.bind([tile.z, tile.x, tile.y, data]);
+        insertStmt.step();
+        insertStmt.reset();
         downloaded++;
       } catch (err) {
         failed++;
@@ -137,11 +155,18 @@ async function downloadAll(type, tiles, db, failedLogPath) {
     });
 
     await Promise.all(promises);
+
+    // Periodically save to disk
+    if (downloaded % saveInterval < concurrency) {
+      saveDatabase(db, dbPath);
+    }
+
     if (i + concurrency < tiles.length) {
       await sleep(500);
     }
   }
 
+  insertStmt.free();
   failedStream.end();
   console.log('');
   return { downloaded, failed };
@@ -167,13 +192,15 @@ async function main() {
   const tiles = getTileRange(params.bbox, params.zoom);
   console.log(`Total tiles to download: ${tiles.length}`);
 
-  const db = initDatabase(dbPath);
+  const db = await initDatabase(dbPath);
 
   console.log(`Saving to: ${dbPath}`);
   console.log('Starting download...\n');
 
-  const { downloaded, failed } = await downloadAll(params.type, tiles, db, failedLogPath);
+  const { downloaded, failed } = await downloadAll(params.type, tiles, db, dbPath, failedLogPath);
 
+  // Final save
+  saveDatabase(db, dbPath);
   db.close();
 
   console.log(`\nDone! ${downloaded} tiles downloaded, ${failed} failed.`);
