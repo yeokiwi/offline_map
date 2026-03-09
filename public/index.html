@@ -9,6 +9,7 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { height: 100%; }
     #map { width: 100%; height: 100%; }
+
     #status-bar {
       position: fixed;
       bottom: 0;
@@ -21,14 +22,196 @@
       font-size: 13px;
       z-index: 1000;
     }
+
+    #routing-panel {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      background: #fff;
+      border-radius: 8px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.3);
+      z-index: 1000;
+      width: 280px;
+      font-family: Arial, sans-serif;
+      font-size: 13px;
+      max-height: calc(100vh - 60px);
+      overflow-y: auto;
+    }
+
+    #routing-panel .panel-header {
+      padding: 10px 12px;
+      background: #2196F3;
+      color: #fff;
+      border-radius: 8px 8px 0 0;
+      font-weight: bold;
+      font-size: 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    #routing-panel .panel-body {
+      padding: 10px 12px;
+    }
+
+    .mode-toggle {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 10px;
+    }
+
+    .mode-toggle button {
+      flex: 1;
+      padding: 6px 8px;
+      border: 1px solid #ccc;
+      background: #f5f5f5;
+      cursor: pointer;
+      font-size: 12px;
+      border-radius: 4px;
+    }
+
+    .mode-toggle button.active {
+      background: #2196F3;
+      color: #fff;
+      border-color: #2196F3;
+    }
+
+    .hint {
+      color: #888;
+      font-size: 11px;
+      margin-bottom: 8px;
+      font-style: italic;
+    }
+
+    .waypoint-list {
+      list-style: none;
+      margin: 0 0 10px 0;
+      padding: 0;
+    }
+
+    .waypoint-list li {
+      display: flex;
+      align-items: center;
+      padding: 5px 4px;
+      border-bottom: 1px solid #eee;
+      gap: 6px;
+    }
+
+    .waypoint-list li:last-child {
+      border-bottom: none;
+    }
+
+    .wp-label {
+      font-weight: bold;
+      color: #2196F3;
+      min-width: 18px;
+    }
+
+    .wp-coords {
+      flex: 1;
+      color: #555;
+      font-size: 11px;
+      font-family: monospace;
+    }
+
+    .wp-delete {
+      background: none;
+      border: none;
+      color: #e53935;
+      cursor: pointer;
+      font-size: 16px;
+      line-height: 1;
+      padding: 2px 4px;
+    }
+
+    .wp-delete:hover {
+      background: #ffebee;
+      border-radius: 3px;
+    }
+
+    .panel-actions {
+      display: flex;
+      gap: 6px;
+    }
+
+    .panel-actions button {
+      flex: 1;
+      padding: 7px 10px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: bold;
+    }
+
+    .btn-route {
+      background: #4CAF50;
+      color: #fff;
+    }
+
+    .btn-route:hover { background: #43A047; }
+
+    .btn-route:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+
+    .btn-clear {
+      background: #e53935;
+      color: #fff;
+    }
+
+    .btn-clear:hover { background: #d32f2f; }
+
+    .route-info {
+      margin-top: 8px;
+      padding: 8px;
+      background: #e8f5e9;
+      border-radius: 4px;
+      font-size: 12px;
+    }
+
+    .route-info span {
+      font-weight: bold;
+    }
+
+    .route-error {
+      margin-top: 8px;
+      padding: 8px;
+      background: #ffebee;
+      border-radius: 4px;
+      font-size: 12px;
+      color: #c62828;
+    }
   </style>
 </head>
 <body>
   <div id="map"></div>
+
+  <div id="routing-panel">
+    <div class="panel-header">
+      <span>Navigation</span>
+    </div>
+    <div class="panel-body">
+      <div class="mode-toggle">
+        <button id="btn-mode-pan" class="active" onclick="setMode('pan')">Pan</button>
+        <button id="btn-mode-waypoint" onclick="setMode('waypoint')">Add Waypoints</button>
+      </div>
+      <div class="hint" id="mode-hint">Click "Add Waypoints" then click on the map.</div>
+      <ul class="waypoint-list" id="waypoint-list"></ul>
+      <div class="panel-actions">
+        <button class="btn-route" id="btn-route" disabled onclick="computeRoute()">Get Route</button>
+        <button class="btn-clear" onclick="clearAll()">Clear All</button>
+      </div>
+      <div id="route-result"></div>
+    </div>
+  </div>
+
   <div id="status-bar">Zoom: — | Centre: —</div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
+    // --- Map setup ---
     const map = L.map('map', {
       center: [1.3521, 103.8198],
       zoom: 15,
@@ -56,6 +239,7 @@
       { position: 'topright' }
     ).addTo(map);
 
+    // --- Status bar ---
     const statusBar = document.getElementById('status-bar');
 
     function updateStatus() {
@@ -69,6 +253,205 @@
     map.on('moveend', updateStatus);
     map.on('zoomend', updateStatus);
     updateStatus();
+
+    // --- Waypoint & Routing ---
+    let mode = 'pan'; // 'pan' or 'waypoint'
+    let waypoints = [];    // array of { marker, latlng }
+    let routeLine = null;
+
+    const waypointListEl = document.getElementById('waypoint-list');
+    const btnRoute = document.getElementById('btn-route');
+    const routeResultEl = document.getElementById('route-result');
+    const modeHintEl = document.getElementById('mode-hint');
+
+    function setMode(m) {
+      mode = m;
+      document.getElementById('btn-mode-pan').classList.toggle('active', m === 'pan');
+      document.getElementById('btn-mode-waypoint').classList.toggle('active', m === 'waypoint');
+      if (m === 'waypoint') {
+        modeHintEl.textContent = 'Click on the map to add waypoints.';
+        map.getContainer().style.cursor = 'crosshair';
+      } else {
+        modeHintEl.textContent = 'Click "Add Waypoints" then click on the map.';
+        map.getContainer().style.cursor = '';
+      }
+    }
+
+    function waypointLabel(index) {
+      return String.fromCharCode(65 + index); // A, B, C, ...
+    }
+
+    function createWaypointIcon(label) {
+      return L.divIcon({
+        className: '',
+        html: '<div style="background:#2196F3;color:#fff;width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:bold;font-size:13px;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.4);">' + label + '</div>',
+        iconSize: [26, 26],
+        iconAnchor: [13, 13],
+      });
+    }
+
+    function renderWaypointList() {
+      waypointListEl.innerHTML = '';
+      waypoints.forEach(function(wp, i) {
+        const li = document.createElement('li');
+        const label = document.createElement('span');
+        label.className = 'wp-label';
+        label.textContent = waypointLabel(i);
+        const coords = document.createElement('span');
+        coords.className = 'wp-coords';
+        coords.textContent = wp.latlng.lat.toFixed(5) + ', ' + wp.latlng.lng.toFixed(5);
+        const del = document.createElement('button');
+        del.className = 'wp-delete';
+        del.title = 'Remove waypoint';
+        del.innerHTML = '&times;';
+        del.onclick = function() { removeWaypoint(i); };
+        li.appendChild(label);
+        li.appendChild(coords);
+        li.appendChild(del);
+        waypointListEl.appendChild(li);
+      });
+      btnRoute.disabled = waypoints.length < 2;
+    }
+
+    function addWaypoint(latlng) {
+      const index = waypoints.length;
+      const marker = L.marker(latlng, {
+        icon: createWaypointIcon(waypointLabel(index)),
+        draggable: true,
+      }).addTo(map);
+
+      const wp = { marker: marker, latlng: latlng };
+      waypoints.push(wp);
+
+      marker.on('dragend', function() {
+        wp.latlng = marker.getLatLng();
+        renderWaypointList();
+        clearRoute();
+      });
+
+      renderWaypointList();
+      clearRoute();
+    }
+
+    function removeWaypoint(index) {
+      const wp = waypoints[index];
+      map.removeLayer(wp.marker);
+      waypoints.splice(index, 1);
+
+      // Update remaining marker icons
+      waypoints.forEach(function(wp, i) {
+        wp.marker.setIcon(createWaypointIcon(waypointLabel(i)));
+      });
+
+      renderWaypointList();
+      clearRoute();
+    }
+
+    function clearRoute() {
+      if (routeLine) {
+        map.removeLayer(routeLine);
+        routeLine = null;
+      }
+      routeResultEl.innerHTML = '';
+    }
+
+    function clearAll() {
+      waypoints.forEach(function(wp) { map.removeLayer(wp.marker); });
+      waypoints = [];
+      clearRoute();
+      renderWaypointList();
+    }
+
+    // Map click handler
+    map.on('click', function(e) {
+      if (mode === 'waypoint') {
+        addWaypoint(e.latlng);
+      }
+    });
+
+    // --- Route computation via OSRM ---
+    async function computeRoute() {
+      if (waypoints.length < 2) return;
+
+      btnRoute.disabled = true;
+      btnRoute.textContent = 'Computing...';
+      routeResultEl.innerHTML = '';
+      clearRoute();
+
+      // Build coordinate string: lng,lat;lng,lat;...
+      const coords = waypoints
+        .map(function(wp) { return wp.latlng.lng.toFixed(6) + ',' + wp.latlng.lat.toFixed(6); })
+        .join(';');
+
+      try {
+        const response = await fetch('/api/route?coords=' + encodeURIComponent(coords));
+        const data = await response.json();
+
+        if (data.error) {
+          routeResultEl.innerHTML = '<div class="route-error">' + data.error + '</div>';
+          return;
+        }
+
+        if (!data.routes || data.routes.length === 0) {
+          routeResultEl.innerHTML = '<div class="route-error">No route found between these points.</div>';
+          return;
+        }
+
+        const route = data.routes[0];
+        const geometry = route.geometry;
+
+        // Decode polyline geometry
+        const latlngs = decodePolyline(geometry);
+        routeLine = L.polyline(latlngs, {
+          color: '#1565C0',
+          weight: 5,
+          opacity: 0.8,
+        }).addTo(map);
+
+        map.fitBounds(routeLine.getBounds(), { padding: [50, 50] });
+
+        // Show route info
+        const distKm = (route.distance / 1000).toFixed(2);
+        const durMin = Math.round(route.duration / 60);
+        routeResultEl.innerHTML =
+          '<div class="route-info">' +
+          'Distance: <span>' + distKm + ' km</span><br>' +
+          'Duration: <span>~' + durMin + ' min</span>' +
+          '</div>';
+
+      } catch (err) {
+        routeResultEl.innerHTML = '<div class="route-error">Route request failed: ' + err.message + '</div>';
+      } finally {
+        btnRoute.disabled = waypoints.length < 2;
+        btnRoute.textContent = 'Get Route';
+      }
+    }
+
+    // Decode Google-style encoded polyline (used by OSRM)
+    function decodePolyline(encoded) {
+      var points = [];
+      var index = 0, lat = 0, lng = 0;
+      while (index < encoded.length) {
+        var b, shift = 0, result = 0;
+        do {
+          b = encoded.charCodeAt(index++) - 63;
+          result |= (b & 0x1f) << shift;
+          shift += 5;
+        } while (b >= 0x20);
+        lat += (result & 1) ? ~(result >> 1) : (result >> 1);
+
+        shift = 0; result = 0;
+        do {
+          b = encoded.charCodeAt(index++) - 63;
+          result |= (b & 0x1f) << shift;
+          shift += 5;
+        } while (b >= 0x20);
+        lng += (result & 1) ? ~(result >> 1) : (result >> 1);
+
+        points.push([lat / 1e5, lng / 1e5]);
+      }
+      return points;
+    }
   </script>
 </body>
 </html>

@@ -1,5 +1,6 @@
 const express = require('express');
 const initSqlJs = require('sql.js');
+const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
 
@@ -89,6 +90,32 @@ app.get('/tiles/:type/:z/:x/:y.png', (req, res) => {
   res.set('Content-Type', 'image/png');
   res.set('Cache-Control', 'public, max-age=86400');
   return res.send(PLACEHOLDER_PNG);
+});
+
+// Routing proxy — forwards to OSRM public API to avoid CORS issues
+app.get('/api/route', async (req, res) => {
+  const { coords } = req.query;
+  if (!coords) {
+    return res.status(400).json({ error: 'Missing coords parameter' });
+  }
+
+  const url = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=polyline`;
+
+  try {
+    const response = await axios.get(url, {
+      timeout: 15000,
+      headers: {
+        'User-Agent': 'OfflineMapViewer/1.0 (educational project)',
+      },
+    });
+    res.json(response.data);
+  } catch (err) {
+    const status = err.response ? err.response.status : 500;
+    const message = err.response
+      ? 'OSRM returned error ' + status
+      : 'Could not reach routing server: ' + err.message;
+    res.status(status).json({ error: message });
+  }
 });
 
 // Initialize SQL.js then start server
