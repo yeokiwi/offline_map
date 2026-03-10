@@ -369,7 +369,7 @@
       }
     });
 
-    // --- Route computation via OSRM ---
+    // --- Offline route computation ---
     async function computeRoute() {
       if (waypoints.length < 2) return;
 
@@ -398,10 +398,9 @@
         }
 
         const route = data.routes[0];
-        const geometry = route.geometry;
 
-        // Decode polyline geometry
-        const latlngs = decodePolyline(geometry);
+        // geometry is an array of [lng, lat] — convert to [lat, lng] for Leaflet
+        const latlngs = route.geometry.map(function(c) { return [c[1], c[0]]; });
         routeLine = L.polyline(latlngs, {
           color: '#1565C0',
           weight: 5,
@@ -425,32 +424,6 @@
         btnRoute.disabled = waypoints.length < 2;
         btnRoute.textContent = 'Get Route';
       }
-    }
-
-    // Decode Google-style encoded polyline (used by OSRM)
-    function decodePolyline(encoded) {
-      var points = [];
-      var index = 0, lat = 0, lng = 0;
-      while (index < encoded.length) {
-        var b, shift = 0, result = 0;
-        do {
-          b = encoded.charCodeAt(index++) - 63;
-          result |= (b & 0x1f) << shift;
-          shift += 5;
-        } while (b >= 0x20);
-        lat += (result & 1) ? ~(result >> 1) : (result >> 1);
-
-        shift = 0; result = 0;
-        do {
-          b = encoded.charCodeAt(index++) - 63;
-          result |= (b & 0x1f) << shift;
-          shift += 5;
-        } while (b >= 0x20);
-        lng += (result & 1) ? ~(result >> 1) : (result >> 1);
-
-        points.push([lat / 1e5, lng / 1e5]);
-      }
-      return points;
     }
   </script>
 </body>
