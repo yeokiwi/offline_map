@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const initSqlJs = require('sql.js');
 const path = require('path');
@@ -7,6 +8,13 @@ const { createRoutePlanner, KNOWN_PLACES } = require('./route-planner.js');
 
 const app = express();
 const PORT = 3000;
+
+// LLM configuration from .env
+const LLM_API_BASE_URL = process.env.LLM_API_BASE_URL || 'https://api.deepseek.com';
+const LLM_API_KEY = process.env.LLM_API_KEY;
+const LLM_MODEL = process.env.LLM_MODEL || 'deepseek-chat';
+const LLM_MAX_TOKENS = parseInt(process.env.LLM_MAX_TOKENS, 10) || 4096;
+const LLM_TEMPERATURE = parseFloat(process.env.LLM_TEMPERATURE) || 0.7;
 
 app.use(express.json());
 
@@ -232,10 +240,10 @@ function executeToolCall(name, args) {
 }
 
 app.post('/api/chat', async (req, res) => {
-  const { messages, apiKey } = req.body;
+  const { messages } = req.body;
 
-  if (!apiKey) {
-    return res.status(400).json({ error: 'Deepseek API key is required. Enter it in the chat settings.' });
+  if (!LLM_API_KEY || LLM_API_KEY === 'your-api-key-here') {
+    return res.status(500).json({ error: 'LLM API key not configured. Set LLM_API_KEY in .env file.' });
   }
 
   if (!messages || !Array.isArray(messages)) {
@@ -246,7 +254,7 @@ app.post('/api/chat', async (req, res) => {
     return res.status(503).json({ error: 'Routing engine not ready. Run "node road-downloader.js" first.' });
   }
 
-  const openai = new OpenAI({ apiKey, baseURL: 'https://api.deepseek.com' });
+  const openai = new OpenAI({ apiKey: LLM_API_KEY, baseURL: LLM_API_BASE_URL });
 
   const chatMessages = [
     { role: 'system', content: SYSTEM_PROMPT },
@@ -258,10 +266,12 @@ app.post('/api/chat', async (req, res) => {
     let maxIterations = 10;
     while (maxIterations-- > 0) {
       const completion = await openai.chat.completions.create({
-        model: 'deepseek-chat',
+        model: LLM_MODEL,
         messages: chatMessages,
         tools: CHAT_TOOLS,
         tool_choice: 'auto',
+        max_tokens: LLM_MAX_TOKENS,
+        temperature: LLM_TEMPERATURE,
       });
 
       const choice = completion.choices[0];
@@ -305,7 +315,7 @@ app.post('/api/chat', async (req, res) => {
   } catch (err) {
     console.error('Chat API error:', err.message);
     if (err.status === 401) {
-      return res.status(401).json({ error: 'Invalid Deepseek API key.' });
+      return res.status(401).json({ error: 'Invalid LLM API key. Check LLM_API_KEY in .env file.' });
     }
     return res.status(500).json({ error: `Chat failed: ${err.message}` });
   }
@@ -316,6 +326,7 @@ initSql().then(() => {
   planner = createRoutePlanner();
   app.listen(PORT, () => {
     console.log(`Offline map server running at http://localhost:${PORT}`);
+    console.log(`LLM: ${LLM_MODEL} @ ${LLM_API_BASE_URL} (key ${LLM_API_KEY ? 'configured' : 'MISSING — set LLM_API_KEY in .env'})`);
     console.log(`MCP server available via: node mcp-server.js (stdio transport)`);
   });
 }).catch((err) => {

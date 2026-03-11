@@ -200,29 +200,6 @@
       padding: 0 4px;
     }
 
-    .chat-settings {
-      padding: 8px 12px;
-      background: #f5f5f5;
-      border-bottom: 1px solid #ddd;
-      flex-shrink: 0;
-    }
-
-    .chat-settings input {
-      width: 100%;
-      padding: 6px 8px;
-      border: 1px solid #ccc;
-      border-radius: 4px;
-      font-size: 12px;
-      font-family: monospace;
-    }
-
-    .chat-settings label {
-      font-size: 11px;
-      color: #666;
-      display: block;
-      margin-bottom: 3px;
-    }
-
     .chat-messages {
       flex: 1;
       overflow-y: auto;
@@ -343,10 +320,6 @@
     <div class="chat-header">
       <span>AI Route Planner</span>
       <button onclick="toggleChat()" title="Close">&times;</button>
-    </div>
-    <div class="chat-settings">
-      <label for="api-key-input">Deepseek API Key</label>
-      <input type="password" id="api-key-input" placeholder="sk-..." />
     </div>
     <div class="chat-messages" id="chat-messages">
       <div class="chat-msg system">
@@ -581,13 +554,6 @@
     const chatMessages = document.getElementById('chat-messages');
     const chatInput = document.getElementById('chat-input');
     const chatSendBtn = document.getElementById('chat-send-btn');
-    const apiKeyInput = document.getElementById('api-key-input');
-
-    // Persist API key in localStorage
-    apiKeyInput.value = localStorage.getItem('deepseek_api_key') || '';
-    apiKeyInput.addEventListener('change', function() {
-      localStorage.setItem('deepseek_api_key', apiKeyInput.value);
-    });
 
     let chatHistory = []; // conversation messages sent to backend
     let chatOpen = false;
@@ -627,12 +593,6 @@
       const text = chatInput.value.trim();
       if (!text) return;
 
-      const apiKey = apiKeyInput.value.trim();
-      if (!apiKey) {
-        appendChatMessage('error', 'Please enter your Deepseek API key above.');
-        return;
-      }
-
       appendChatMessage('user', text);
       chatInput.value = '';
       chatSendBtn.disabled = true;
@@ -647,7 +607,6 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             messages: chatHistory,
-            apiKey: apiKey,
           }),
         });
 
