@@ -9,10 +9,12 @@
     "download:satellite": "node downloader.js --type satellite --zoom 15 --bbox 103.6,1.15,104.1,1.50"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "sql.js": "^1.10.3",
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@turf/turf": "^7.2.0",
     "axios": "^1.6.7",
+    "express": "^4.18.2",
     "geojson-path-finder": "^2.0.2",
-    "@turf/turf": "^7.2.0"
+    "openai": "^6.27.0",
+    "sql.js": "^1.10.3"
   }
 }

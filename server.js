@@ -2,11 +2,13 @@ const express = require('express');
 const initSqlJs = require('sql.js');
 const path = require('path');
 const fs = require('fs');
-const PathFinder = require('geojson-path-finder').default;
-const turf = require('@turf/turf');
+const OpenAI = require('openai');
+const { createRoutePlanner, KNOWN_PLACES } = require('./route-planner.js');
 
 const app = express();
 const PORT = 3000;
+
+app.use(express.json());
 
 // 1x1 transparent PNG (minimal; browsers scale to fill the tile slot)
 const PLACEHOLDER_PNG = Buffer.from(
@@ -48,98 +50,8 @@ function getDb(type) {
   }
 }
 
-// --- Offline routing setup ---
-let pathFinderInstance = null;
-let roadNetwork = null;
-
-function initRouting() {
-  const roadsPath = path.join(__dirname, 'data', 'roads.geojson');
-  if (!fs.existsSync(roadsPath)) {
-    console.warn('Warning: data/roads.geojson not found. Run "node road-downloader.js" first.');
-    console.warn('Routing will be unavailable.');
-    return;
-  }
-
-  console.log('Loading road network...');
-  const raw = fs.readFileSync(roadsPath, 'utf-8');
-  roadNetwork = JSON.parse(raw);
-  console.log(`Road network: ${roadNetwork.features.length} segments`);
-
-  console.log('Building routing graph (this may take a moment)...');
-  pathFinderInstance = new PathFinder(roadNetwork, {
-    tolerance: 1e-5,
-    weight: function (a, b, props) {
-      // Distance in km
-      const dist = turf.distance(turf.point(a), turf.point(b), { units: 'kilometers' });
-
-      // Speed estimates by road type (km/h)
-      const speeds = {
-        motorway: 90, motorway_link: 60,
-        trunk: 70, trunk_link: 50,
-        primary: 60, primary_link: 40,
-        secondary: 50, secondary_link: 35,
-        tertiary: 40, tertiary_link: 30,
-        residential: 30,
-        unclassified: 30,
-        living_street: 20,
-        service: 15,
-      };
-
-      const speed = speeds[props.highway] || 30;
-      const time = dist / speed; // hours
-
-      // Handle oneway streets
-      if (props.oneway === 'yes' || props.oneway === '1') {
-        return { forward: time, backward: Infinity };
-      }
-      if (props.oneway === '-1') {
-        return { forward: Infinity, backward: time };
-      }
-
-      return time;
-    },
-    edgeDataReducer: function (seed, props) {
-      return { highway: props.highway, name: props.name || '' };
-    },
-    edgeDataSeed: function () {
-      return {};
-    },
-  });
-  console.log('Routing graph ready.');
-}
-
-/**
- * Snap a [lng, lat] coordinate to the nearest vertex in the road network.
- * Uses turf.nearestPointOnLine to find the closest road, then snaps to
- * the nearest vertex of that road segment.
- */
-function snapToNetwork(lng, lat) {
-  if (!roadNetwork) return null;
-
-  const pt = turf.point([lng, lat]);
-  let bestDist = Infinity;
-  let bestCoord = null;
-
-  // Find nearest road segment
-  for (const feature of roadNetwork.features) {
-    const snapped = turf.nearestPointOnLine(feature, pt, { units: 'kilometers' });
-    if (snapped.properties.dist < bestDist) {
-      bestDist = snapped.properties.dist;
-      // Snap to the nearest actual vertex of this line (not interpolated point)
-      const coords = feature.geometry.coordinates;
-      let vertexBestDist = Infinity;
-      for (const c of coords) {
-        const d = turf.distance(pt, turf.point(c), { units: 'kilometers' });
-        if (d < vertexBestDist) {
-          vertexBestDist = d;
-          bestCoord = c;
-        }
-      }
-    }
-  }
-
-  return bestCoord;
-}
+// --- Shared route planner ---
+let planner = null;
 
 // Serve static frontend
 app.use(express.static(path.join(__dirname, 'public')));
@@ -162,7 +74,6 @@ app.get('/tiles/:type/:z/:x/:y.png', (req, res) => {
     return res.send(PLACEHOLDER_PNG);
   }
 
-  // Tiles are stored with XYZ convention (same as downloaded), so query directly
   const stmt = db.prepare(
     'SELECT tile_data FROM tiles WHERE zoom_level = ? AND tile_column = ? AND tile_row = ?'
   );
@@ -179,16 +90,14 @@ app.get('/tiles/:type/:z/:x/:y.png', (req, res) => {
   }
 
   stmt.free();
-
-  // Tile not found — return placeholder
   res.set('Content-Type', 'image/png');
   res.set('Cache-Control', 'public, max-age=86400');
   return res.send(PLACEHOLDER_PNG);
 });
 
-// Offline routing endpoint
+// Offline routing endpoint (used by the map UI directly)
 app.get('/api/route', (req, res) => {
-  if (!pathFinderInstance) {
+  if (!planner || !planner.getStatus().ready) {
     return res.status(503).json({
       error: 'Routing unavailable. Run "node road-downloader.js" to download road data first.',
     });
@@ -199,7 +108,6 @@ app.get('/api/route', (req, res) => {
     return res.status(400).json({ error: 'Missing coords parameter' });
   }
 
-  // Parse coords: "lng,lat;lng,lat;..."
   const points = coords.split(';').map((pair) => {
     const [lng, lat] = pair.split(',').map(Number);
     return { lng, lat };
@@ -209,68 +117,206 @@ app.get('/api/route', (req, res) => {
     return res.status(400).json({ error: 'Need at least 2 waypoints' });
   }
 
-  // Snap all points to the road network
-  const snappedPoints = points.map((p) => snapToNetwork(p.lng, p.lat));
-  for (let i = 0; i < snappedPoints.length; i++) {
-    if (!snappedPoints[i]) {
-      return res.status(400).json({
-        error: `Waypoint ${i + 1} could not be snapped to the road network. Try clicking closer to a road.`,
-      });
-    }
+  const result = planner.planRoute(points);
+  if (result.error) {
+    return res.status(400).json({ error: result.error });
   }
 
-  // Compute route between consecutive waypoint pairs
-  let totalPath = [];
-  let totalDistance = 0;
-  let totalWeight = 0;
+  res.json(result);
+});
 
-  for (let i = 0; i < snappedPoints.length - 1; i++) {
-    const start = turf.point(snappedPoints[i]);
-    const end = turf.point(snappedPoints[i + 1]);
+// --- OpenAI Chat endpoint with function calling ---
 
-    const result = pathFinderInstance.findPath(start, end);
-    if (!result) {
-      return res.status(400).json({
-        error: `No route found between waypoint ${i + 1} and ${i + 2}. The points may be on disconnected road segments.`,
-      });
-    }
-
-    // Append path coordinates (avoid duplicating junction point)
-    if (totalPath.length > 0 && result.path.length > 0) {
-      totalPath = totalPath.concat(result.path.slice(1));
-    } else {
-      totalPath = totalPath.concat(result.path);
-    }
-
-    totalWeight += result.weight;
-  }
-
-  // Calculate actual distance along the path
-  if (totalPath.length >= 2) {
-    const line = turf.lineString(totalPath);
-    totalDistance = turf.length(line, { units: 'kilometers' });
-  }
-
-  // Estimated duration (weight is in hours based on speed)
-  const durationSeconds = totalWeight * 3600;
-
-  res.json({
-    routes: [
-      {
-        distance: totalDistance * 1000, // meters
-        duration: durationSeconds,
-        geometry: totalPath, // array of [lng, lat] coordinates
+const OPENAI_TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'plan_route',
+      description: 'Plan a driving route between two or more waypoints in Singapore. Returns distance, estimated duration, and route geometry.',
+      parameters: {
+        type: 'object',
+        properties: {
+          waypoints: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                lat: { type: 'number', description: 'Latitude' },
+                lng: { type: 'number', description: 'Longitude' },
+                name: { type: 'string', description: 'Optional place name' },
+              },
+              required: ['lat', 'lng'],
+            },
+            minItems: 2,
+            description: 'Ordered list of waypoints. First is origin, last is destination.',
+          },
+          speed_factor: {
+            type: 'number',
+            description: 'Speed multiplier (0.1-3.0). <1 for traffic/slow, >1 for optimistic.',
+            default: 1.0,
+          },
+        },
+        required: ['waypoints'],
       },
-    ],
-    snappedWaypoints: snappedPoints.map((c) => ({ lng: c[0], lat: c[1] })),
-  });
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'geocode_place',
+      description: 'Look up coordinates for well-known places in Singapore by name.',
+      parameters: {
+        type: 'object',
+        properties: {
+          place_name: {
+            type: 'string',
+            description: 'Name of a place in Singapore (e.g. "Changi Airport", "Marina Bay Sands")',
+          },
+        },
+        required: ['place_name'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_places',
+      description: 'List all well-known Singapore places available for route planning.',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
+];
+
+const SYSTEM_PROMPT = `You are a helpful route planning assistant for Singapore. You help users plan driving routes between locations in Singapore.
+
+You have access to these tools:
+- plan_route: Compute driving routes between waypoints. Returns distance and estimated duration.
+- geocode_place: Look up coordinates for well-known Singapore locations.
+- list_places: Show all known places you can route between.
+
+When a user asks to plan a route:
+1. First use geocode_place to look up any place names they mention
+2. Then use plan_route with the coordinates to compute the route
+3. Present the results clearly with distance and time
+
+If the user mentions places you don't recognize, suggest using list_places to see available locations.
+Always respond concisely and include the key route information (distance, duration).`;
+
+function executeToolCall(name, args) {
+  switch (name) {
+    case 'plan_route': {
+      const result = planner.planRoute(args.waypoints, args.speed_factor || 1.0);
+      if (result.error) return JSON.stringify({ error: result.error });
+      const route = result.routes[0];
+      return JSON.stringify({
+        distance_km: (route.distance / 1000).toFixed(2),
+        distance_m: route.distance,
+        duration_minutes: Math.round(route.duration / 60),
+        duration_seconds: route.duration,
+        waypoints_snapped: result.snappedWaypoints,
+        route_points: route.geometry.length,
+        geometry: route.geometry,
+      });
+    }
+    case 'geocode_place': {
+      const result = planner.geocodePlace(args.place_name);
+      if (!result) return JSON.stringify({ error: `Place "${args.place_name}" not found. Use list_places to see available locations.` });
+      return JSON.stringify(result);
+    }
+    case 'list_places': {
+      return JSON.stringify(planner.listPlaces().map((p) => ({ name: p.name, lat: p.lat, lng: p.lng })));
+    }
+    default:
+      return JSON.stringify({ error: `Unknown tool: ${name}` });
+  }
+}
+
+app.post('/api/chat', async (req, res) => {
+  const { messages, apiKey } = req.body;
+
+  if (!apiKey) {
+    return res.status(400).json({ error: 'OpenAI API key is required. Enter it in the chat settings.' });
+  }
+
+  if (!messages || !Array.isArray(messages)) {
+    return res.status(400).json({ error: 'messages array is required' });
+  }
+
+  if (!planner || !planner.getStatus().ready) {
+    return res.status(503).json({ error: 'Routing engine not ready. Run "node road-downloader.js" first.' });
+  }
+
+  const openai = new OpenAI({ apiKey });
+
+  const chatMessages = [
+    { role: 'system', content: SYSTEM_PROMPT },
+    ...messages,
+  ];
+
+  try {
+    // Loop to handle multiple rounds of tool calls
+    let maxIterations = 10;
+    while (maxIterations-- > 0) {
+      const completion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: chatMessages,
+        tools: OPENAI_TOOLS,
+        tool_choice: 'auto',
+      });
+
+      const choice = completion.choices[0];
+      const assistantMessage = choice.message;
+      chatMessages.push(assistantMessage);
+
+      if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
+        // No more tool calls — return the final response
+        // Extract route geometry if present in any tool results
+        let routeGeometry = null;
+        for (const msg of chatMessages) {
+          if (msg.role === 'tool') {
+            try {
+              const parsed = JSON.parse(msg.content);
+              if (parsed.geometry) {
+                routeGeometry = parsed.geometry;
+              }
+            } catch (e) { /* ignore */ }
+          }
+        }
+
+        return res.json({
+          reply: assistantMessage.content,
+          route: routeGeometry,
+        });
+      }
+
+      // Execute each tool call
+      for (const toolCall of assistantMessage.tool_calls) {
+        const args = JSON.parse(toolCall.function.arguments);
+        const result = executeToolCall(toolCall.function.name, args);
+        chatMessages.push({
+          role: 'tool',
+          tool_call_id: toolCall.id,
+          content: result,
+        });
+      }
+    }
+
+    return res.status(500).json({ error: 'Too many tool call iterations' });
+  } catch (err) {
+    console.error('Chat API error:', err.message);
+    if (err.status === 401) {
+      return res.status(401).json({ error: 'Invalid OpenAI API key.' });
+    }
+    return res.status(500).json({ error: `Chat failed: ${err.message}` });
+  }
 });
 
 // Initialize SQL.js then start server
 initSql().then(() => {
-  initRouting();
+  planner = createRoutePlanner();
   app.listen(PORT, () => {
     console.log(`Offline map server running at http://localhost:${PORT}`);
+    console.log(`MCP server available via: node mcp-server.js (stdio transport)`);
   });
 }).catch((err) => {
   console.error('Failed to initialize SQL.js:', err.message);
