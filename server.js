@@ -125,9 +125,9 @@ app.get('/api/route', (req, res) => {
   res.json(result);
 });
 
-// --- OpenAI Chat endpoint with function calling ---
+// --- Deepseek Chat endpoint with function calling ---
 
-const OPENAI_TOOLS = [
+const CHAT_TOOLS = [
   {
     type: 'function',
     function: {
@@ -235,7 +235,7 @@ app.post('/api/chat', async (req, res) => {
   const { messages, apiKey } = req.body;
 
   if (!apiKey) {
-    return res.status(400).json({ error: 'OpenAI API key is required. Enter it in the chat settings.' });
+    return res.status(400).json({ error: 'Deepseek API key is required. Enter it in the chat settings.' });
   }
 
   if (!messages || !Array.isArray(messages)) {
@@ -246,7 +246,7 @@ app.post('/api/chat', async (req, res) => {
     return res.status(503).json({ error: 'Routing engine not ready. Run "node road-downloader.js" first.' });
   }
 
-  const openai = new OpenAI({ apiKey });
+  const openai = new OpenAI({ apiKey, baseURL: 'https://api.deepseek.com' });
 
   const chatMessages = [
     { role: 'system', content: SYSTEM_PROMPT },
@@ -258,9 +258,9 @@ app.post('/api/chat', async (req, res) => {
     let maxIterations = 10;
     while (maxIterations-- > 0) {
       const completion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'deepseek-chat',
         messages: chatMessages,
-        tools: OPENAI_TOOLS,
+        tools: CHAT_TOOLS,
         tool_choice: 'auto',
       });
 
@@ -305,7 +305,7 @@ app.post('/api/chat', async (req, res) => {
   } catch (err) {
     console.error('Chat API error:', err.message);
     if (err.status === 401) {
-      return res.status(401).json({ error: 'Invalid OpenAI API key.' });
+      return res.status(401).json({ error: 'Invalid Deepseek API key.' });
     }
     return res.status(500).json({ error: `Chat failed: ${err.message}` });
   }
