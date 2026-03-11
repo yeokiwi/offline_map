@@ -64,6 +64,9 @@ let planner = null;
 // Serve static frontend
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Serve Leaflet assets locally for offline use
+app.use('/lib/leaflet', express.static(path.join(__dirname, 'node_modules', 'leaflet', 'dist')));
+
 // Tile endpoint
 app.get('/tiles/:type/:z/:x/:y.png', (req, res) => {
   const { type } = req.params;
